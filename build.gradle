@@ -1,6 +1,19 @@
-// Top-level build file where you can add configuration options common to all sub-projects/modules.
+buildscript {
+    dependencies {
+        // Override AGP's built-in KGP to include the build-cache security fix.
+        classpath libs.kotlin.gradle.plugin
+        // Security floors for AGP's transitive build-time dependencies (not APK libraries).
+        constraints {
+            classpath(libs.commons.lang3) { because 'GHSA-j288-q9x7-2f5v' }
+            classpath(libs.jose4j) { because 'GHSA-3677-xxcr-wjqv' }
+            classpath(libs.bouncycastle.prov) { because 'ASN.1 / name-constraint / LDAP security fixes' }
+            classpath(libs.bouncycastle.pkix) { because 'GHSA-wg6q-6289-32hp' }
+            classpath(libs.bouncycastle.util) { because 'Keep Bouncy Castle modules aligned' }
+            classpath(libs.jdom2) { because 'GHSA-2363-cqg2-863c' }
+        }
+    }
+}
+
 plugins {
     alias(libs.plugins.android.application) apply false
-    alias(libs.plugins.kotlin.android) apply false
-    alias(libs.plugins.kotlin.compose) apply false
 }

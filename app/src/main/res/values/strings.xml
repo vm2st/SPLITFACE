@@ -1,3 +1,14 @@
 <resources>
     <string name="app_name">SPLITFACE</string>
+    <string name="pause">Пауза</string>
+    <string name="resume">Продолжить</string>
+    <string name="reset">↻ Новая игра</string>
+    <string name="confirm_reset">↻ Подтвердить сброс</string>
+    <string name="new_game">НОВАЯ ИГРА</string>
+    <string name="foul">ФОЛ! 0</string>
+    <string name="point">+1</string>
+    <string name="distortion">ПОМЕХА</string>
+    <string name="pause_hint">Пауза. Коснитесь поля, чтобы продолжить</string>
+    <string name="reset_hint">Подтвердите сброс кнопкой. Касание поля — отмена</string>
+    <string name="game_description">Игровое поле. Синий игрок: %1$d. Красный игрок: %2$d. Нажимайте на свой мяч на своей половине поля.</string>
 </resources>

@@ -1,446 +1,171 @@
 package com.vm2st.splitface
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.*
-import android.os.Handler
-import android.os.Looper
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.os.Bundle
 import android.util.AttributeSet
+import android.util.TypedValue
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
-import kotlin.math.*
+import android.view.View
+import kotlin.math.min
+import kotlin.random.Random
 
-class GameView : SurfaceView, SurfaceHolder.Callback, Runnable {
+/** Rendering, input and physics deliberately share the Android main thread. */
+class GameView @JvmOverloads constructor(
+    context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
+) : View(context, attrs, defStyleAttr) {
+    private val game = GameEngine()
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val dash = DashPathEffect(floatArrayOf(20f, 20f), 0f)
+    private val popups = ArrayList<Popup>()
+    private data class Popup(val text: String, val x: Float, val y: Float, val color: Int, var life: Float = .3f)
+    private var hostActive = false
+    private var attached = false
+    private var scheduled = false
+    private var lastFrameNanos = 0L
+    var onStateChanged: (() -> Unit)? = null
+    val isPaused get() = game.paused
+    val isResetPending get() = game.resetPending
 
-    // Конструкторы для создания из кода и из XML
-    constructor(context: Context) : super(context) {
-        init()
+    private val frame = object : Runnable {
+        override fun run() {
+            scheduled = false
+            if (!canAnimate()) return
+            val now = System.nanoTime()
+            if (lastFrameNanos != 0L) {
+                val dt = ((now - lastFrameNanos) / 1_000_000_000f).coerceIn(0f, .25f)
+                game.advance(dt)
+                val iterator = popups.iterator()
+                while (iterator.hasNext()) {
+                    val popup = iterator.next()
+                    popup.life -= dt
+                    if (popup.life <= 0f) iterator.remove()
+                }
+            }
+            lastFrameNanos = now
+            invalidate()
+            scheduleFrame()
+        }
     }
 
-    constructor(context: Context, attrs: AttributeSet) : super(context, attrs) {
-        init()
-    }
-
-    constructor(context: Context, attrs: AttributeSet, defStyleAttr: Int) : super(context, attrs, defStyleAttr) {
-        init()
-    }
-
-    private fun init() {
-        holder.addCallback(this)
+    init {
         isFocusable = true
+        isClickable = true
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
+        updateDescription()
     }
 
-    companion object {
-        private const val DISTORTION_FRAMES = 18
-    }
+    private fun canAnimate() = attached && hostActive && windowVisibility == VISIBLE &&
+        isShown && hasWindowFocus() && width > 0 && height > 0 && game.ready && !game.paused
 
-    private var thread: Thread? = null
-    private var isRunning = false
-
-    // Размеры экрана
-    private var width = 0
-    private var height = 0
-    private var midX = 0f
-
-    // Мячи
-    private lateinit var leftBall: Ball
-    private lateinit var rightBall: Ball
-    private var ballRadius = 0f
-
-    // Счёт
-    private var leftScore = 0
-    private var rightScore = 0
-
-    // Помехи (дисторшн)
-    private var leftDistortion = 0
-    private var rightDistortion = 0
-
-    // Задержка удара
-    private var hitCooldown = false
-
-    // Всплывающие сообщения
-    private data class Popup(val text: String, var x: Float, var y: Float, var life: Int, val color: Int)
-    private val popups = mutableListOf<Popup>()
-
-    // Пауза и сброс
-    private var paused = false
-    private var resetRequested = false
-
-    // Кисти для рисования
-    private val paintLine = Paint().apply {
-        color = Color.WHITE
-        strokeWidth = 3f
-        style = Paint.Style.STROKE
-    }
-    private val paintDash = Paint().apply {
-        color = Color.BLACK
-        strokeWidth = 6f
-        style = Paint.Style.STROKE
-        pathEffect = DashPathEffect(floatArrayOf(20f, 20f), 0f)
-    }
-    private val paintText = Paint().apply {
-        isAntiAlias = true
-        textAlign = Paint.Align.LEFT
-        typeface = Typeface.MONOSPACE
-    }
-    private val paintPopup = Paint().apply {
-        isAntiAlias = true
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.DEFAULT_BOLD
-    }
-    private val paintButton = Paint().apply {
-        isAntiAlias = true
-        color = Color.argb(200, 30, 30, 50)
-        style = Paint.Style.FILL
-    }
-    private val paintButtonStroke = Paint().apply {
-        color = Color.LTGRAY
-        strokeWidth = 2f
-        style = Paint.Style.STROKE
-    }
-    private val paintButtonText = Paint().apply {
-        color = Color.argb(255, 220, 220, 255)
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.DEFAULT_BOLD
-    }
-
-    data class Ball(var x: Float, var y: Float, var vx: Float, var vy: Float, var radius: Float)
-
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        startGameLoop()
-    }
-
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        this.width = width
-        this.height = height
-        midX = width / 2f
-        ballRadius = min(width, height) * 0.07f
-        initBalls()
-    }
-
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
-        stopGameLoop()
-    }
-
-    private fun startGameLoop() {
-        if (thread == null || !isRunning) {
-            isRunning = true
-            thread = Thread(this)
-            thread?.start()
+    private fun scheduleFrame() {
+        if (!scheduled && canAnimate()) {
+            scheduled = true
+            postOnAnimation(frame)
         }
     }
 
-    private fun stopGameLoop() {
-        isRunning = false
-        thread?.join()
-        thread = null
+    private fun stopFrames() {
+        removeCallbacks(frame)
+        scheduled = false
+        lastFrameNanos = 0L
     }
 
-    override fun run() {
-        while (isRunning) {
-            if (!paused) {
-                updatePhysics()
-                updateDistortion()
-                updatePopups()
-            }
-            draw()
-            Thread.sleep(16)
+    fun setHostActive(active: Boolean) {
+        hostActive = active
+        stopFrames()
+        if (active) scheduleFrame()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        attached = true
+        scheduleFrame()
+    }
+
+    override fun onDetachedFromWindow() {
+        attached = false
+        stopFrames()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        stopFrames()
+        if (hasWindowFocus) scheduleFrame()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        // View construction may invoke this override before Kotlin fields are initialized.
+        if (attached) {
+            stopFrames()
+            if (visibility == VISIBLE) scheduleFrame()
         }
     }
 
-    private fun initBalls() {
-        val baseWidth = 1080f
-        val scale = min(width, height) / baseWidth
-        leftBall = Ball(
-            x = width * 0.25f,
-            y = height * 0.5f,
-            vx = 4.2f * scale,
-            vy = 3.0f * scale,
-            radius = ballRadius
-        )
-        rightBall = Ball(
-            x = width * 0.75f,
-            y = height * 0.5f,
-            vx = -3.8f * scale,
-            vy = 3.2f * scale,
-            radius = ballRadius
-        )
-    }
-
-    private fun updatePhysics() {
-        leftBall.x += leftBall.vx
-        leftBall.y += leftBall.vy
-        rightBall.x += rightBall.vx
-        rightBall.y += rightBall.vy
-
-        clampBall(leftBall)
-        clampBall(rightBall)
-
-        val dx = leftBall.x - rightBall.x
-        val dy = leftBall.y - rightBall.y
-        val dist = hypot(dx, dy)
-        val minDist = leftBall.radius + rightBall.radius
-        if (dist < minDist) {
-            val angle = atan2(dy, dx)
-            val overlap = minDist - dist
-            val corrX = cos(angle) * overlap * 0.5f
-            val corrY = sin(angle) * overlap * 0.5f
-            leftBall.x += corrX
-            leftBall.y += corrY
-            rightBall.x -= corrX
-            rightBall.y -= corrY
-
-            val nx = dx / dist
-            val ny = dy / dist
-            val vrelx = leftBall.vx - rightBall.vx
-            val vrely = leftBall.vy - rightBall.vy
-            val dot = vrelx * nx + vrely * ny
-            if (dot < 0) {
-                val e = 0.7f
-                val imp = (1 + e) * dot / 2
-                leftBall.vx -= imp * nx
-                leftBall.vy -= imp * ny
-                rightBall.vx += imp * nx
-                rightBall.vy += imp * ny
-            }
-        }
-    }
-
-    private fun clampBall(ball: Ball) {
-        if (ball.y - ball.radius < 0) {
-            ball.y = ball.radius
-            ball.vy = -ball.vy
-        }
-        if (ball.y + ball.radius > height) {
-            ball.y = height - ball.radius
-            ball.vy = -ball.vy
-        }
-        if (ball.x - ball.radius < 0) {
-            ball.x = ball.radius
-            ball.vx = -ball.vx
-        }
-        if (ball.x + ball.radius > width) {
-            ball.x = width - ball.radius
-            ball.vx = -ball.vx
-        }
-    }
-
-    private fun updateDistortion() {
-        if (leftDistortion > 0) leftDistortion--
-        if (rightDistortion > 0) rightDistortion--
-    }
-
-    private fun updatePopups() {
-        val iterator = popups.iterator()
-        while (iterator.hasNext()) {
-            val p = iterator.next()
-            p.life -= 2
-            if (p.life <= 0) iterator.remove()
-        }
-    }
-
-    private fun addPopup(text: String, x: Float, y: Float, color: Int) {
-        popups.add(Popup(text, x, y, 35, color))
-    }
-
-    fun resetGame() {
-        leftScore = 0
-        rightScore = 0
-        leftDistortion = 0
-        rightDistortion = 0
-        initBalls()
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        stopFrames()
+        game.resize(w, h)
         popups.clear()
-        addPopup("НОВАЯ ИГРА", width / 2f, height * 0.1f, Color.WHITE)
-        if (paused) {
-            paused = false
-            resetRequested = false
-        }
+        scheduleFrame()
     }
 
-    private fun handleHit(touchX: Float, touchY: Float) {
-        if (paused) return
-        if (hitCooldown) return
+    fun togglePause() { game.togglePause(); stateChanged() }
 
-        val hitLeft = hypot(touchX - leftBall.x, touchY - leftBall.y) <= leftBall.radius
-        val hitRight = hypot(touchX - rightBall.x, touchY - rightBall.y) <= rightBall.radius
-        if (!hitLeft && !hitRight) return
-
-        val isLeftZone = touchX < midX
-        val isLeftBall = hitLeft
-
-        if ((isLeftZone && !isLeftBall) || (!isLeftZone && isLeftBall)) {
-            if (isLeftZone) {
-                leftScore = 0
-                addPopup("ФОЛ! 0", touchX, touchY, Color.rgb(59, 130, 246))
-            } else {
-                rightScore = 0
-                addPopup("ФОЛ! 0", touchX, touchY, Color.rgb(239, 68, 68))
-            }
-            val ball = if (isLeftBall) leftBall else rightBall
-            val angle = atan2(touchY - ball.y, touchX - ball.x)
-            ball.vx = cos(angle) * 6f
-            ball.vy = sin(angle) * 6f
-            hitCooldown = true
-            Handler(Looper.getMainLooper()).postDelayed({ hitCooldown = false }, 150)
-            return
+    fun requestReset() {
+        if (game.requestReset()) {
+            popups.clear()
+            addPopup(context.getString(R.string.new_game), width / 2f, height * .3f, Color.WHITE)
         }
-
-        val ball = if (isLeftBall) leftBall else rightBall
-        if (isLeftZone) {
-            leftScore++
-            addPopup("+1", ball.x, ball.y - 20, Color.rgb(59, 130, 246))
-        } else {
-            rightScore++
-            addPopup("+1", ball.x, ball.y - 20, Color.rgb(239, 68, 68))
-        }
-
-        val angle = atan2(touchY - ball.y, touchX - ball.x)
-        var speed = hypot(ball.vx, ball.vy) + 2.2f
-        if (speed > 10f) speed = 10f
-        ball.vx = cos(angle) * speed
-        ball.vy = sin(angle) * speed
-
-        val onLine = abs(ball.x - midX) < 8f
-        if (onLine) {
-            if (isLeftZone) {
-                rightDistortion = DISTORTION_FRAMES
-                addPopup("ПОМЕХА", midX, height / 2f, Color.rgb(255, 170, 136))
-            } else {
-                leftDistortion = DISTORTION_FRAMES
-                addPopup("ПОМЕХА", midX, height / 2f, Color.rgb(136, 221, 255))
-            }
-        }
-
-        hitCooldown = true
-        Handler(Looper.getMainLooper()).postDelayed({ hitCooldown = false }, 120)
+        stateChanged()
     }
 
-    private fun draw() {
-        val canvas = holder.lockCanvas() ?: return
-        try {
-            canvas.drawColor(Color.BLACK)
-            canvas.drawRect(0f, 0f, midX, height.toFloat(), Paint().apply { color = Color.rgb(10, 42, 58) })
-            canvas.drawRect(midX, 0f, width.toFloat(), height.toFloat(), Paint().apply { color = Color.rgb(58, 26, 26) })
-
-            val random = java.util.Random()
-            if (leftDistortion > 0) {
-                val noisePaint = Paint().apply { color = Color.argb(170, 136, 221, 255) }
-                repeat(30) {
-                    val x1 = random.nextInt(midX.toInt()).toFloat()
-                    val y1 = random.nextInt(height).toFloat()
-                    canvas.drawRect(x1, y1, x1 + 8f, y1 + 5f, noisePaint)
-                }
-            }
-            if (rightDistortion > 0) {
-                val noisePaint = Paint().apply { color = Color.argb(170, 255, 170, 136) }
-                repeat(30) {
-                    val x1 = (midX.toInt() + random.nextInt((width - midX).toInt())).toFloat()
-                    val y1 = random.nextInt(height).toFloat()
-                    canvas.drawRect(x1, y1, x1 + 8f, y1 + 5f, noisePaint)
-                }
-            }
-
-            canvas.drawLine(midX, 0f, midX, height.toFloat(), paintDash)
-            canvas.drawLine(midX, 0f, midX, height.toFloat(), paintLine)
-
-            drawBall(canvas, leftBall, Color.rgb(59, 130, 246), Color.rgb(30, 58, 138))
-            drawBall(canvas, rightBall, Color.rgb(239, 68, 68), Color.rgb(127, 26, 26))
-
-            val safeTop = 50f      // отступ сверху
-            val safeLeft = 50f     // отступ слева
-            val safeRight = 80f    // отступ справа (чтобы текст не прижимался к краю)
-
-            paintText.textSize = min(width * 0.08f, 70f)
-            paintText.color = Color.rgb(59, 130, 246)
-            canvas.drawText(leftScore.toString(), safeLeft, safeTop, paintText)
-            paintText.color = Color.rgb(239, 68, 68)
-            canvas.drawText(rightScore.toString(), width - safeRight, safeTop, paintText)
-
-            val buttonSize = min(width, height) * 0.1f
-            val buttonY = height * 0.12f
-            canvas.drawCircle(width / 2f, buttonY + buttonSize / 2, buttonSize / 2, paintButton)
-            canvas.drawCircle(width / 2f, buttonY + buttonSize / 2, buttonSize / 2, paintButtonStroke)
-            paintButtonText.textSize = buttonSize * 0.6f
-            canvas.drawText("↻", width / 2f, buttonY + buttonSize * 0.72f, paintButtonText)
-
-            paintPopup.textSize = min(width * 0.05f, 32f)
-            for (p in popups) {
-                paintPopup.color = p.color
-                canvas.drawText(p.text, p.x, p.y - p.life / 1.5f, paintPopup)
-            }
-
-            if (paused) {
-                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), Paint().apply { color = Color.argb(80, 0, 0, 0) })
-                val msgPaint = Paint().apply {
-                    color = Color.WHITE
-                    textAlign = Paint.Align.CENTER
-                    textSize = min(width * 0.05f, 28f)
-                    typeface = Typeface.DEFAULT_BOLD
-                }
-                val bgPaint = Paint().apply {
-                    color = Color.argb(200, 0, 0, 0)
-                    style = Paint.Style.FILL
-                }
-                val pauseMessage = "Нажмите ещё раз, чтобы сбросить"
-                val msgWidth = msgPaint.measureText(pauseMessage)
-                canvas.drawRect(width / 2f - msgWidth / 2 - 30, height / 2f - 40, width / 2f + msgWidth / 2 + 30, height / 2f + 40, bgPaint)
-                canvas.drawText(pauseMessage, width / 2f, height / 2f + 10, msgPaint)
-            }
-        } finally {
-            holder.unlockCanvasAndPost(canvas)
-        }
+    private fun stateChanged() {
+        stopFrames()
+        updateDescription()
+        onStateChanged?.invoke()
+        invalidate()
+        scheduleFrame()
     }
 
-    private fun drawBall(canvas: Canvas, ball: Ball, colorStart: Int, colorEnd: Int) {
-        val gradient = RadialGradient(ball.x - 6, ball.y - 6, 5f, colorStart, colorEnd, Shader.TileMode.CLAMP)
-        val paint = Paint().apply {
-            shader = gradient
-            isAntiAlias = true
-        }
-        canvas.drawCircle(ball.x, ball.y, ball.radius, paint)
-        paint.shader = null
-        paint.color = Color.argb(200, 255, 255, 255)
-        canvas.drawCircle(ball.x - 3, ball.y - 3, ball.radius * 0.25f, paint)
+    private fun updateDescription() {
+        contentDescription = context.getString(R.string.game_description, game.leftScore, game.rightScore)
     }
 
-    @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        performClick()
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                for (i in 0 until event.pointerCount) {
-                    val x = event.getX(i)
-                    val y = event.getY(i)
-
-                    val buttonSize = min(width, height) * 0.1f
-                    val buttonY = height * 0.12f
-                    val inButton = hypot(x - width / 2f, y - (buttonY + buttonSize / 2)) <= buttonSize / 2
-
-                    if (inButton) {
-                        if (!paused) {
-                            paused = true
-                            resetRequested = true
-                        } else {
-                            resetGame()
-                            paused = false
-                            resetRequested = false
-                        }
-                        return true
+                if (!hostActive || !hasWindowFocus() || !game.ready) return true
+                if (game.paused) {
+                    // A second finger in the same gesture must not resume and then score.
+                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                        game.resume()
+                        stateChanged()
+                        performClick()
                     }
-                }
-
-                if (paused) {
-                    paused = false
-                    resetRequested = false
                     return true
                 }
-
-                for (i in 0 until event.pointerCount) {
-                    handleHit(event.getX(i), event.getY(i))
+                // Only the newly pressed pointer, never every held finger.
+                val index = event.actionIndex
+                val x = event.getX(index)
+                val y = event.getY(index)
+                val hit = game.hit(x, y)
+                if (hit != null) {
+                    val color = if (hit.leftPlayer) BLUE else RED
+                    addPopup(context.getString(if (hit.foul) R.string.foul else R.string.point), x, y, color)
+                    if (hit.distortion) addPopup(context.getString(R.string.distortion), width / 2f, height / 2f, Color.WHITE)
+                    updateDescription()
+                    invalidate()
                 }
-                return true
+                performClick()
             }
+            MotionEvent.ACTION_CANCEL -> { /* No delayed or held-pointer actions to cancel. */ }
         }
         return true
     }
@@ -448,5 +173,122 @@ class GameView : SurfaceView, SurfaceHolder.Callback, Runnable {
     override fun performClick(): Boolean {
         super.performClick()
         return true
+    }
+
+    private fun addPopup(text: String, x: Float, y: Float, color: Int) {
+        if (popups.size >= 32) popups.removeAt(0)
+        popups.add(Popup(text, x, y, color))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (!game.ready || width <= 0 || height <= 0) return
+        val mid = width / 2f
+        paint.shader = null
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(10, 42, 58)
+        canvas.drawRect(0f, 0f, mid, height.toFloat(), paint)
+        paint.color = Color.rgb(58, 26, 26)
+        canvas.drawRect(mid, 0f, width.toFloat(), height.toFloat(), paint)
+        drawDistortion(canvas, 0f, mid, game.leftDistortion, Color.argb(170, 136, 221, 255))
+        drawDistortion(canvas, mid, width.toFloat(), game.rightDistortion, Color.argb(170, 255, 170, 136))
+        paint.color = Color.WHITE
+        paint.strokeWidth = resources.displayMetrics.density * 2f
+        paint.pathEffect = dash
+        canvas.drawLine(mid, 0f, mid, height.toFloat(), paint)
+        paint.pathEffect = null
+        drawBall(canvas, game.leftBall, BLUE)
+        drawBall(canvas, game.rightBall, RED)
+        val textSize = min(height * .12f, TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 48f, resources.displayMetrics))
+        paint.textSize = textSize
+        paint.typeface = Typeface.MONOSPACE
+        paint.color = BLUE
+        paint.textAlign = Paint.Align.LEFT
+        val margin = min(width * .025f, height * .05f)
+        val baseline = margin - paint.fontMetrics.top
+        val scoreWidth = (mid - 2f * margin).coerceAtLeast(1f)
+        val leftText = game.leftScore.toString()
+        val leftMeasured = paint.measureText(leftText)
+        if (leftMeasured > scoreWidth) paint.textSize *= scoreWidth / leftMeasured
+        canvas.drawText(leftText, margin, baseline, paint)
+        paint.textAlign = Paint.Align.RIGHT
+        paint.color = RED
+        paint.textSize = textSize
+        val rightText = game.rightScore.toString()
+        val rightMeasured = paint.measureText(rightText)
+        if (rightMeasured > scoreWidth) paint.textSize *= scoreWidth / rightMeasured
+        canvas.drawText(rightText, width - margin, baseline, paint)
+        paint.textAlign = Paint.Align.CENTER
+        paint.typeface = Typeface.DEFAULT_BOLD
+        paint.textSize = min(height * .055f, TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 22f, resources.displayMetrics))
+        for (popup in popups) {
+            paint.color = popup.color
+            paint.alpha = (255 * (popup.life / .3f).coerceIn(0f, 1f)).toInt()
+            val halfText = paint.measureText(popup.text) / 2
+            val x = if (halfText < mid) popup.x.coerceIn(halfText, width - halfText) else mid
+            val y = (popup.y - (.3f - popup.life) * height * .15f)
+                .coerceIn(-paint.fontMetrics.top, height.toFloat())
+            canvas.drawText(popup.text, x, y, paint)
+        }
+        paint.alpha = 255
+        if (game.paused) {
+            paint.color = Color.argb(190, 0, 0, 0)
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            paint.color = Color.WHITE
+            val message = context.getString(if (game.resetPending) R.string.reset_hint else R.string.pause_hint)
+            val available = width * .9f
+            val measured = paint.measureText(message)
+            if (measured > available) paint.textSize *= available / measured
+            canvas.drawText(message, mid, height / 2f - (paint.ascent() + paint.descent()) / 2f, paint)
+        }
+    }
+
+    private fun drawDistortion(canvas: Canvas, from: Float, to: Float, remaining: Float, color: Int) {
+        if (remaining <= 0f || to <= from) return
+        paint.color = color
+        repeat(30) {
+            val x = from + Random.nextFloat() * (to - from)
+            val y = Random.nextFloat() * height
+            canvas.drawRect(x, y, min(x + 8f, to), min(y + 5f, height.toFloat()), paint)
+        }
+    }
+
+    private fun drawBall(canvas: Canvas, ball: GameEngine.Ball, color: Int) {
+        paint.color = color
+        canvas.drawCircle(ball.x, ball.y, ball.radius, paint)
+        paint.color = Color.argb(200, 255, 255, 255)
+        canvas.drawCircle(ball.x - ball.radius * .25f, ball.y - ball.radius * .25f, ball.radius * .25f, paint)
+    }
+
+    fun saveGameState(): Bundle {
+        val s = game.snapshot()
+        return Bundle().apply {
+            putInt("version", 1)
+            putFloatArray("balls", floatArrayOf(s.width, s.height,
+                s.left.x, s.left.y, s.left.vx, s.left.vy, s.right.x, s.right.y, s.right.vx, s.right.vy,
+                s.leftCooldown, s.rightCooldown, s.leftDistortion, s.rightDistortion))
+            putInt("leftScore", s.leftScore); putInt("rightScore", s.rightScore)
+            putBoolean("paused", s.paused); putBoolean("resetPending", s.resetPending)
+        }
+    }
+
+    fun restoreGameState(bundle: Bundle) {
+        if (bundle.getInt("version") != 1) return
+        val b = bundle.getFloatArray("balls") ?: return
+        if (b.size != 14) return
+        val restored = game.restore(GameEngine.State(b[0], b[1],
+            GameEngine.BallState(b[2], b[3], b[4], b[5]), GameEngine.BallState(b[6], b[7], b[8], b[9]),
+            bundle.getInt("leftScore"), bundle.getInt("rightScore"), bundle.getBoolean("paused"),
+            bundle.getBoolean("resetPending"), b[10], b[11], b[12], b[13]))
+        if (restored) {
+            if (width > 0 && height > 0) game.resize(width, height)
+            popups.clear()
+            stateChanged()
+        }
+    }
+
+    companion object {
+        private val BLUE = Color.rgb(59, 130, 246)
+        private val RED = Color.rgb(239, 68, 68)
     }
 }
